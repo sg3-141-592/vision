@@ -2435,6 +2435,62 @@ class TestRotate:
 
         torch.testing.assert_close(actual, expected)
 
+    @pytest.mark.parametrize("size", [(100, 100), (120, 80)])
+    @pytest.mark.parametrize("angle", [15.0, 30.0, 45.0])
+    def test_transform_crop_removes_fill(self, size, angle):
+        # Output of crop=True should contain no fill pixels when input is fully non-zero
+        h, w = size
+        image = tv_tensors.Image(torch.full((3, h, w), 200, dtype=torch.uint8))
+        transform = transforms.RandomRotation((angle, angle), fill=0, crop=True)
+        output = transform(image)
+        assert output.min().item() > 0, "crop=True output should have no fill pixels"
+        assert output.shape[-2] < h or output.shape[-1] < w, "crop=True should reduce at least one dimension"
+
+    @pytest.mark.parametrize("size", [(100, 100), (120, 80)])
+    @pytest.mark.parametrize("angle", [15.0, 30.0, 45.0])
+    def test_transform_crop_consistent_across_inputs(self, size, angle):
+        # Image, mask, and bounding boxes should all be cropped to the same canvas size
+        h, w = size
+        image = tv_tensors.Image(torch.full((3, h, w), 200, dtype=torch.uint8))
+        mask = tv_tensors.Mask(torch.ones(1, h, w, dtype=torch.uint8))
+        boxes = tv_tensors.BoundingBoxes(
+            torch.tensor([[10.0, 10.0, 50.0, 50.0]]),
+            format=tv_tensors.BoundingBoxFormat.XYXY,
+            canvas_size=(h, w),
+        )
+        transform = transforms.RandomRotation((angle, angle), crop=True)
+        out_image, out_mask, out_boxes = transform(image, mask, boxes)
+        assert out_image.shape[-2:] == out_mask.shape[-2:]
+        assert out_boxes.canvas_size == (out_image.shape[-2], out_image.shape[-1])
+
+    def test_transform_crop_and_expand_mutually_exclusive(self):
+        with pytest.raises(ValueError, match="crop and expand are mutually exclusive"):
+            transforms.RandomRotation(30, expand=True, crop=True)
+
+    @pytest.mark.parametrize("angle", [0.0, 90.0, 180.0, 270.0])
+    def test_transform_crop_zero_angle_preserves_size(self, angle):
+        # Multiples of 90° should not reduce the image size
+        image = tv_tensors.Image(torch.zeros(3, 100, 100, dtype=torch.uint8))
+        transform = transforms.RandomRotation((angle, angle), crop=True)
+        output = transform(image)
+        assert output.shape == image.shape
+
+    def test_largest_inscribed_crop_size(self):
+        from torchvision.transforms.v2.functional._geometry import _largest_inscribed_crop_size
+
+        # No rotation: crop equals original size
+        assert _largest_inscribed_crop_size(100, 100, 0) == (100, 100)
+        assert _largest_inscribed_crop_size(200, 100, 0) == (100, 200)
+
+        # 45° square: inscribed square has side = 100 / sqrt(2) ≈ 70.71 → floor to 70
+        crop_h, crop_w = _largest_inscribed_crop_size(100, 100, 45)
+        assert crop_h == crop_w == 70
+
+        # Crop is always smaller than or equal to original dimensions
+        for w, h, a in [(200, 100, 20), (640, 480, 15), (50, 50, 37)]:
+            ch, cw = _largest_inscribed_crop_size(w, h, a)
+            assert ch <= h and cw <= w
+
 
 class TestContainerTransforms:
     class BuiltinTransform(transforms.Transform):
